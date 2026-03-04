@@ -1,13 +1,17 @@
 import os
 import json
+import re
 import requests
 from github import Github, Auth
 
 gh_token = os.environ.get("GITHUB_TOKEN")
-gemini_key = os.environ.get("GEMINI_API_KEY")
+model_token = os.environ.get("GH_MODELS_TOKEN")
 repo_name = os.environ.get("REPOSITORY")
 event_name = os.environ.get("EVENT_NAME")
-allowed_user = os.environ.get("ALLOWED_USER").strip().lower()
+allowed_users = [u.strip().lower() for u in os.environ.get("ALLOWED_USER", "").split(",")]
+
+MODEL_NAME = "Llama-3.3-70B-Instruct"
+ENDPOINT = "https://models.inference.ai.azure.com/chat/completions"
 
 auth = Auth.Token(gh_token)
 gh = Github(auth=auth)
@@ -16,6 +20,7 @@ repo = gh.get_repo(repo_name)
 diff_text = ""
 event_context = ""
 author_login = ""
+trigger_labels = []
 
 if event_name == "push":
     commit_sha = os.environ.get("COMMIT_SHA")
@@ -23,72 +28,73 @@ if event_name == "push":
     if not commit.author:
         exit(0)
     author_login = commit.author.login.strip().lower()
-    if author_login != allowed_user:
+    if author_login not in allowed_users:
         exit(0)
     event_context = f"Commit Message: {commit.commit.message}"
+    trigger_labels = [m.lower() for m in re.findall(r'\[(.*?)\]', commit.commit.message)]
     for file in commit.files:
         diff_text += f"File: {file.filename}\nPatch:\n{file.patch}\n\n"
-        if len(diff_text) > 100000:
-            diff_text += "\n[Diff too large, truncated...]"
+        if len(diff_text) > 10000:
+            diff_text += "\n[Diff truncated...]"
             break
 elif event_name == "pull_request":
     pr_number = int(os.environ.get("PR_NUMBER"))
     pr = repo.get_pull(pr_number)
     author_login = pr.user.login.strip().lower()
-    if author_login != allowed_user:
+    if author_login not in allowed_users:
         exit(0)
     event_context = f"PR Title: {pr.title}\nPR Body: {pr.body}"
+    trigger_labels = [label.name.lower() for label in pr.labels]
     for file in pr.get_files():
         diff_text += f"File: {file.filename}\nPatch:\n{file.patch}\n\n"
-        if len(diff_text) > 100000:
-            diff_text += "\n[Diff too large, truncated...]"
+        if len(diff_text) > 80000:
+            diff_text += "\n[Diff truncated...]"
             break
 else:
     exit(0)
 
-prompt = f"""
-Analyze the following code changes and create a detailed description for a GitHub Issue.
-IMPORTANT: The issue_title and issue_body MUST be written entirely in English.
-
-Context:
-{event_context}
-
-Code Changes:
-{diff_text}
-
-Instructions:
-1. Create a clear issue title and body explaining the changes or implementation details in English.
-2. Choose the most appropriate labels from: ["bug", "documentation", "duplicate", "enhancement", "good first issue", "help wanted", "invalid", "question", "wontfix"].
-3. SECURITY REVIEW: Carefully analyze the code changes for any potential security vulnerabilities (e.g., injection flaws, hardcoded secrets, XSS, insecure data handling).
-   - If you find a potential vulnerability, add a section "### Security Warning" at the end of the `issue_body` describing the risk and how to fix it in English.
-   - Also, if a vulnerability is found, add the label "security" to the `labels` list.
-
+base_instructions = """
 Return only a raw JSON object with no markdown formatting. The JSON must contain these exact keys:
 "issue_title": string,
 "issue_body": string,
 "labels": list of strings
+The issue_title and issue_body MUST be written entirely in English. Choose appropriate standard GitHub labels for the 'labels' list.
 """
 
-model_name = "gemini-2.5-flash"
-api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
-payload = {"contents": [{"parts": [{"text": prompt}]}]}
-headers = {"Content-Type": "application/json"}
+if any(l in trigger_labels for l in ["sec", "security", "audit"]):
+    prompt = f"Act as a Strict Security Auditor. Perform a deep security audit (OWASP Top 10).\nContext: {event_context}\nChanges: {diff_text}\n{base_instructions}"
+elif any(l in trigger_labels for l in ["review", "refactor", "code-review"]):
+    prompt = f"Act as a Strict Code Reviewer. Analyze code quality (SOLID/DRY).\nContext: {event_context}\nChanges: {diff_text}\n{base_instructions}"
+elif any(l in trigger_labels for l in ["qa", "test", "testing"]):
+    prompt = f"Act as a QA Engineer. Identify edge cases and generate unit tests.\nContext: {event_context}\nChanges: {diff_text}\n{base_instructions}"
+elif any(l in trigger_labels for l in ["perf", "performance", "optimize"]):
+    prompt = f"Act as a Performance Expert. Analyze bottlenecks and complexity.\nContext: {event_context}\nChanges: {diff_text}\n{base_instructions}"
+elif any(l in trigger_labels for l in ["pm", "release", "product"]):
+    prompt = f"Act as a Product Manager. Generate user-facing Release Notes.\nContext: {event_context}\nChanges: {diff_text}\n{base_instructions}"
+else:
+    prompt = f"Analyze changes and create a standard documentation issue.\nContext: {event_context}\nChanges: {diff_text}\n{base_instructions}"
 
-resp = requests.post(api_url, json=payload, headers=headers)
+headers = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {model_token}"
+}
+
+payload = {
+    "messages": [
+        {"role": "system", "content": "You are a professional software auditor. Always return valid JSON only."},
+        {"role": "user", "content": prompt}
+    ],
+    "model": MODEL_NAME,
+    "temperature": 0.1
+}
+
+resp = requests.post(ENDPOINT, headers=headers, json=payload)
 resp_data = resp.json()
 
-response_text = resp_data['candidates'][0]['content']['parts'][0]['text'].strip()
+raw_content = resp_data['choices'][0]['message']['content'].strip()
+raw_content = re.sub(r'^```json\s*|```$', '', raw_content, flags=re.MULTILINE).strip()
 
-if response_text.startswith("```json"):
-    response_text = response_text[7:]
-elif response_text.startswith("```"):
-    response_text = response_text[3:]
-    
-if response_text.endswith("```"):
-    response_text = response_text[:-3]
-    
-response_text = response_text.strip()
-result = json.loads(response_text)
+result = json.loads(raw_content)
 
 if event_name == "push":
     footer = f"\n\n---\n*Generated automatically from commit {os.environ.get('COMMIT_SHA')[:7]}*"
