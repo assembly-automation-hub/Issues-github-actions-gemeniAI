@@ -199,7 +199,7 @@ if pr_ref:
     summary = result.get("summary", "")
     if summary:
         pr_comment = (
-            f"### 🤖 AI Analysis Summary\n\n"
+            f"###AI Analysis Summary\n\n"
             f"{summary}\n\n"
             f"**Severity:** `{severity.upper()}`\n\n"
             f"📋 Full details: #{issue.number}"
