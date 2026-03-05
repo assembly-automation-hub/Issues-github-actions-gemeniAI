@@ -229,10 +229,10 @@ if pr_ref:
     summary = result.get("summary", "")
     if summary:
         pr_comment = (
-            f"### 🤖 AI Analysis Summary\n\n"
+            f"###AI Analysis Summary\n\n"
             f"{summary}\n\n"
             f"**Severity:** `{severity.upper()}`\n\n"
-            f"📋 Full details: #{issue.number}"
+            f"Full details: #{issue.number}"
         )
         pr_ref.create_issue_comment(pr_comment)
         print(f"Posted summary comment to PR #{pr_ref.number}")
