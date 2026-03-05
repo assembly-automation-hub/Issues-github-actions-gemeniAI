@@ -1,11 +1,11 @@
-name: AI Issue Generator
+name: Gemeni Auto-Issue Generator
 
 on:
   push:
     branches:
       - main
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, labeled]
 
 jobs:
   build:
@@ -13,7 +13,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-      pull-requests: read
+      pull-requests: write
 
     steps:
       - uses: actions/checkout@v6
